@@ -170,9 +170,31 @@ def append_status_footer(response: str, agent_result: dict[str, Any]) -> str
 ```
 
 **依赖字段：**
-- `agent_result["model"]` — 模型名称
-- `agent_result["last_prompt_tokens"]` — 已用 token 数
-- `agent_result["context_length"]` — 上下文总长（fallback: `get_model_context_length(model)`）
+
+| 字段 | 来源 key | 数据来源 | 何时写入 |
+|------|----------|---------|---------|
+| 模型名称 | `agent_result["model"]` | LLM API 响应 → `run_conversation()` → `_run_agent()` → `run.py` | `run_agent.py` 从 API 响应中提取 |
+| 已用 tokens | `agent_result["last_prompt_tokens"]` | 同上，来自 `usage.prompt_tokens` | API 每次响应时更新，同时持久化到 `session_entry.last_prompt_tokens` |
+| 总上下文 | `agent_result["context_length"]` | `get_model_context_length(model)` 查表（`agent/model_metadata.py`） | `run.py` 第 3793 行在 `_run_agent` 调用前解析；Footer 函数内 fallback 调用 |
+
+**数据流完整链路：**
+
+```
+LLM API Response
+  └── usage.prompt_tokens / usage.total_tokens
+      └── run_conversation() 返回 agent_result dict
+          ├── agent_result["model"] = "minimax-cn/MiniMax-M2.7"
+          ├── agent_result["last_prompt_tokens"] = 47123
+          └── agent_result["context_length"] = 204800  ← 由 get_model_context_length(model) 查表得到
+
+run.py:4600
+  └── append_status_footer(response, agent_result)
+        ├── agent_result["model"]           → "minimax-cn/MiniMax-M2.7"
+        ├── agent_result["last_prompt_tokens"] → 47123
+        └── agent_result["context_length"]    → 204800
+```
+
+**注意：** `agent_result` 本身不直接包含 `context_length` 时，Footer 函数会从 `agent.model_metadata.get_model_context_length(model)` 查表获取。`context_length` 是**模型的最大上下文窗口**（固定值，如 MiniMax-M2.7 = 204800），不是当前已用量。
 
 **容错：** 任何字段缺失均不抛异常，原样返回原始 response。
 
