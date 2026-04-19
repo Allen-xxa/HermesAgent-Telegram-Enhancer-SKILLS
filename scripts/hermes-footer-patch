@@ -1,0 +1,192 @@
+#!/bin/bash
+# =============================================================================
+# Hermes-Agent Footer & Compress-Notifier Patch
+#
+# 用法: hermes-footer-patch <container_name> [run_py_path]
+# 示例: hermes-footer-patch hermes_agent_core
+#       hermes-footer-patch my-hermes /opt/hermes/gateway/run.py
+#
+# 作用: 升级 hermes-agent 后，重新注入 Status Bar Footer 和
+#       上下文压缩中 通知两个功能
+#
+# 原理: 把两大段内联代码替换成两行 import+调用
+#       新逻辑全部放在 gateway/status_footer.py 和 gateway/compress_notifier.py
+# =============================================================================
+
+set -euo pipefail
+
+# ── 参数解析 ────────────────────────────────────────────────────────────────
+CONTAINER="${1:-}"
+RUN_PY_PATH="${2:-}"
+
+if [ -z "$CONTAINER" ]; then
+    echo "用法: $0 <container_name> [run_py_path]"
+    echo "  container_name: Hermes 容器名（如 hermes_agent_core）"
+    echo "  run_py_path:   可选，容器内 run.py 路径，默认 /opt/hermes/gateway/run.py"
+    exit 1
+fi
+
+# 脚本所在目录（repo 根目录）
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_GATEWAY="$SCRIPT_DIR/gateway"
+
+if [ -z "$RUN_PY_PATH" ]; then
+    RUN_PY="/opt/hermes/gateway/run.py"
+else
+    RUN_PY="$RUN_PY_PATH"
+fi
+
+echo "⚙️  Hermes Footer Patch"
+echo "  Container: $CONTAINER"
+echo "  run.py:    $RUN_PY"
+echo ""
+
+# ── 前置检查 ─────────────────────────────────────────────────────────────────
+if ! docker inspect "$CONTAINER" &>/dev/null; then
+    echo "❌ Container '$CONTAINER' not found"
+    exit 1
+fi
+
+# ── Step 1: 复制模块文件 ───────────────────────────────────────────────────
+echo "📦 Copying module files to container..."
+
+for file in status_footer.py compress_notifier.py; do
+    src="$REPO_GATEWAY/$file"
+    dst="/opt/hermes/gateway/$file"
+    if [ ! -f "$src" ]; then
+        echo "  ❌ $src not found"
+        exit 1
+    fi
+    docker cp "$src" "$CONTAINER:$dst"
+    echo "  ✅ $file → $dst"
+done
+
+# ── Step 2: 验证模块语法 ───────────────────────────────────────────────────
+echo ""
+echo "🔍 Verifying module syntax..."
+docker exec "$CONTAINER" python3 -m py_compile /opt/hermes/gateway/status_footer.py && echo "  ✅ status_footer.py OK"
+docker exec "$CONTAINER" python3 -m py_compile /opt/hermes/gateway/compress_notifier.py && echo "  ✅ compress_notifier.py OK"
+
+# ── Step 3: Patch run.py ────────────────────────────────────────────────────
+echo ""
+echo "🩹 Patching run.py..."
+
+docker exec "$CONTAINER" python3 << 'PYEOF'
+import re, sys
+
+path = "/opt/hermes/gateway/run.py"
+with open(path, "r") as f:
+    content = f.read()
+    lines = content.splitlines()
+
+# ── Patch 1: Status Bar Footer ───────────────────────────────────────────────
+# 特征：找到内联 footer 生成代码（short_model, _fmt_toks, footer bar）
+# 替换为 import + 调用
+FOOTER_PATTERNS = [
+    r'short_model\s*=\s*model\.split\(["\']\/["\']',
+    r'_fmt_toks',
+    r'footer\s*=\s*f["\']\\n\\n⚕',
+]
+
+footer_start = None
+footer_end = None
+in_footer_block = False
+for i, line in enumerate(lines):
+    if any(re.search(p, line) for p in FOOTER_PATTERNS[:2]) and footer_start is None:
+        # 找到块的起始，往前找注释行
+        for j in range(i, -1, -1):
+            if "Status Bar Footer" in lines[j] or "status bar" in lines[j].lower():
+                footer_start = j
+                break
+        if footer_start is None:
+            footer_start = max(0, i - 2)
+        in_footer_block = True
+        continue
+    if in_footer_block and ("response = response + footer" in line or "response += footer" in line):
+        footer_end = i
+        in_footer_block = False
+        break
+
+if footer_start is not None and footer_end is not None:
+    new_block = [
+        "            # ── Status Bar Footer (refactored → gateway/status_footer.py) ───",
+        "            from gateway.status_footer import append_status_footer",
+        "            response = append_status_footer(response, agent_result)",
+        "            # ── End Status Bar Footer ─────────────────────────────────────────",
+    ]
+    lines = lines[:footer_start] + new_block + lines[footer_end+1:]
+    print(f"  ✅ Footer block replaced (lines {footer_start+1}–{footer_end+1} → 4 lines)")
+elif "append_status_footer" in content:
+    print("  ⚠️  Footer already patched")
+else:
+    print("  ❌ Footer block NOT found in run.py")
+    sys.exit(1)
+
+# ── Patch 2: Compression Notifier ──────────────────────────────────────────
+# 特征：找到 "--- Notify user that compression is starting ---" 块
+# 替换为 import + 调用
+NOTIFY_START = None
+NOTIFY_END = None
+for i, line in enumerate(lines):
+    if "--- Notify user that compression is starting ---" in line and NOTIFY_START is None:
+        NOTIFY_START = i
+    if NOTIFY_END is None and NOTIFY_START is not None:
+        if "--- End notification ---" in line:
+            # 验证这段包含 _adapter.send（不是其他地方的通知）
+            block = "\n".join(lines[NOTIFY_START:i+1])
+            if "_adapter.send" in block or "adapter.send" in block:
+                NOTIFY_END = i
+                break
+
+if NOTIFY_START is not None and NOTIFY_END is not None:
+    new_block = [
+        "                    # --- Notify user (via gateway/compress_notifier.py) ---",
+        "                    from gateway.compress_notifier import notify_compression_start",
+        "                    await notify_compression_start(",
+        "                        adapter=_adapter,",
+        "                        chat_id=source.chat_id,",
+        "                        event_message_id=event.message_id if hasattr(event, \"message_id\") else None,",
+        "                        metadata=_hyg_meta,",
+        "                    )",
+        "                    # --- End notification ---",
+    ]
+    lines = lines[:NOTIFY_START] + new_block + lines[NOTIFY_END+1:]
+    print(f"  ✅ Compression notifier replaced (lines {NOTIFY_START+1}–{NOTIFY_END+1} → 9 lines)")
+elif "notify_compression_start" in content:
+    print("  ⚠️  Compression notifier already patched")
+else:
+    print("  ❌ Compression notifier block NOT found in run.py")
+    sys.exit(1)
+
+# 写回
+with open(path, "w") as f:
+    f.write("\n".join(lines))
+
+# 验证
+with open(path) as f:
+    c = f.read()
+assert "append_status_footer" in c, "Footer patch verification failed!"
+assert "notify_compression_start" in c, "Notifier patch verification failed!"
+print("  ✅ Both patches verified in run.py")
+PYEOF
+
+# ── Step 4: 重启容器 ────────────────────────────────────────────────────────
+echo ""
+echo "🔄 Restarting container..."
+docker restart "$CONTAINER" &>/dev/null
+sleep 2
+echo "  ✅ Container restarted"
+
+# ── Step 5: 最终验证 ────────────────────────────────────────────────────────
+echo ""
+echo "🔌 Verifying module imports in running container..."
+docker exec "$CONTAINER" python3 -c "
+from gateway.status_footer import append_status_footer
+from gateway.compress_notifier import notify_compression_start, _build_cyborg_snapshot
+print('  ✅ All imports OK')
+print('  ✅ Patch complete!')
+" 2>&1 | sed 's/^/  /'
+
+echo ""
+echo "✨ Done! 升级 Hermes 镜像后，重新运行此脚本即可恢复所有增强功能。"
+echo "   仓库地址: https://github.com/Allen-xxa/HermesAgent-Telegram-Enhancer-SKILLS"
