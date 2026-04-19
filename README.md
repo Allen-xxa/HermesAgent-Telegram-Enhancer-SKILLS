@@ -11,7 +11,7 @@
 | 模块 | 文件 | 功能 |
 |------|------|------|
 | **Status Bar Footer** | `gateway/status_footer.py` | 在每条回复底部追加 `⚕ MiniMax-M2.7 │ 47K/204.8K │ [██░░░░░░░░] 23%` |
-| **Compression Notifier** | `gateway/compress_notifier.py` | 上下文压缩时自动发送 Telegram 通知，包含系统状态快照 |
+| **Compression Notifier** | `gateway/compress_notifier.py` | 上下文压缩时自动发送 Telegram 通知 `⟳ 上下文压缩中…` |
 
 ---
 
@@ -19,7 +19,6 @@
 
 - Hermes Agent 已部署并运行中
 - Telegram Adapter 已配置（能发送消息）
-- 工程控制论状态文件已初始化（可选，通知模块会优雅降级）
 
 ---
 
@@ -141,12 +140,9 @@ HermesAgent-Telegram-Enhancer-SKILLS/
 
 **函数：** `notify_compression_start(adapter, chat_id, event_message_id, metadata)`
 
-- 发送 Telegram 消息：`⟳ 上下文压缩中`
-- 附加当前工程控制论状态快照（如果有）：
-  - **Lyapunov V 值**：系统稳定性指标
-  - **相平面轨迹**：收敛状态
-  - **PID 偏好**：当前参数风格
-- 状态文件路径：`/root/.hermes/engineering_cybernetics_study/`
+- 发送 Telegram 消息：`⟳ 上下文压缩中…`
+- 简洁明了，仅告知用户当前正在执行上下文压缩操作
+- **设计原则**：此模块只负责通知用户，不涉及任何系统内部状态
 
 ---
 
@@ -157,9 +153,6 @@ A: 运行 `scripts/hermes-footer-patch` 即可一键恢复。
 
 **Q: 提示 `No module named 'gateway.status_footer'`？**  
 A: 确保 `status_footer.py` 和 `compress_notifier.py` 已复制到容器的 `/opt/hermes/gateway/` 目录。
-
-**Q: 通知没有发到 Telegram？**  
-A: 检查工程控制论状态文件是否存在：`docker exec hermes_agent_core ls /root/.hermes/engineering_cybernetics_study/`
 
 ---
 

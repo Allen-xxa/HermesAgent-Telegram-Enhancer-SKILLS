@@ -50,7 +50,7 @@ gateway/run.py  (~10,383 行)  ← 减少约96行
 
 gateway/
   ├── status_footer.py     (57行, 纯函数)
-  └── compress_notifier.py (137行, 异步函数)
+  └── compress_notifier.py (50行, 异步函数, 简洁通知)
 ```
 
 ---
@@ -214,22 +214,12 @@ async def notify_compression_start(
 
 **发送内容：**
 ```
-⟳ 上下文压缩中
-[Lyapunov]
-  V=0.0848
-  反馈历史=8条
-  建议: 系统运行正常
-[相平面]
-  轨迹点=42个
-  最新x=0.12
+⟳ 上下文压缩中…
 ```
 
-**状态文件（读取路径）：**
-- `/root/.hermes/engineering_cybernetics_study/n3_lyapunov_state.json`
-- `/root/.hermes/engineering_cybernetics_study/n1_phase_plane_state.json`
-- `/root/.hermes/engineering_cybernetics_study/p2_pid.json`
+简洁明了，仅告知用户当前正在执行上下文压缩操作。
 
-**容错：** 状态文件不存在时只发送 `⟳ 上下文压缩中`，不抛异常。
+**设计原则：** 此模块只负责通知用户"正在压缩"，不涉及任何系统内部状态（如 cybernetics）。系统内部状态通过 `cybernetics_middleware` 注入到 Agent 的 system prompt，是给 Agent 自己看的，不是给用户看的。
 
 ---
 
@@ -238,16 +228,10 @@ async def notify_compression_start(
 ### 1. 精确匹配 old_string
 `memory` 工具的 `replace` 需要精确匹配 old_string。`hermes-footer-patch` 脚本使用正则表达式，匹配更宽松，但仍建议先在测试环境验证。
 
-### 2. Cybernetics V 值类型
-`n3_lyapunov_state.json` 中 V 存储为 `dict`：`{'V': 0.0849, 'timestamp': ...}`，**不是** raw float。直接 `float(history[0])` 会报错。正确写法：
-```python
-v_val = v_history[-1].get("V", 0.0) if isinstance(v_history[-1], dict) else float(v_history[-1])
-```
-
-### 3. Container vs Repo 版本差异
+### 2. Container vs Repo 版本差异
 容器内 `run.py`（~10,485 行）可能与 GitHub 仓库（~10,380 行）不完全一致。patch 脚本通过特征字符串匹配，而非固定行号，兼容两种版本。
 
-### 4. 复制后权限
+### 3. 复制后权限
 `docker cp` 会保留文件权限，但如果容器内 Python 解释器缺少执行权限，确保：
 ```bash
 docker exec ${CONTAINER} chmod 644 /opt/hermes/gateway/status_footer.py
@@ -286,9 +270,9 @@ print('OK: both modules imported successfully')
 
 ## Context Window Impact
 
-| 改动 | 行数变化 | Context 影响 |
-|------|---------|-------------|
-| `run.py` 删除内联代码 | -96 行 | 略微减少 |
-| `status_footer.py` 新增 | +57 行 | 略微增加 |
-| `compress_notifier.py` 新增 | +137 行 | 略微增加 |
-| **净变化** | **+98 行** | 可忽略不计 |
+|| 改动 | 行数变化 | Context 影响 |
+||------|---------|-------------||
+|| `run.py` 删除内联代码 | -96 行 | 略微减少 ||
+|| `status_footer.py` 新增 | +57 行 | 略微增加 ||
+|| `compress_notifier.py` 新增 | +50 行 | 略微增加 ||
+|| **净变化** | **+11 行** | 可忽略不计 ||
